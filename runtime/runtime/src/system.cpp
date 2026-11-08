@@ -107,6 +107,11 @@ std::uint64_t g_iop_synced = 0;
 bool g_state_request = false;
 bool g_file_state_request = false;  // the request is for --save-state, not (only) for a key
 bool g_resumed = false;
+// LoadExecPS2 / ExecPS2 (kernel.cpp): a build holds one program, so a game that asks for another one (Splinter Cell Chaos Theory's
+// "Return to Game Mode" goes back to its launcher) starts its own program again: the machine as it was at the second frame, kept in
+// memory (about 45 MB). PS2_EXEC_RESTART=0 keeps the old behaviour (the run stops there).
+std::vector<std::uint8_t> g_boot_state;
+bool g_boot_capture = false, g_restart_request = false;
 std::atomic<int> g_state_operation{0};
 std::mutex g_state_mutex;
 std::string g_state_path;
@@ -396,6 +401,7 @@ void vblank() {
     kernel::on_vblank_start();
     if (g_options.max_frames && g_frames >= g_options.max_frames) halt("frame limit reached");
     if (g_options.save_state_frame && g_frames == g_options.save_state_frame) g_state_request = g_file_state_request = true;
+    if (g_frames == 2 && g_boot_state.empty() && os::env("PS2_EXEC_RESTART") != "0") g_state_request = g_boot_capture = true;
     if (quick::vblank_tick()) g_state_request = true;  // F5, F8 or F9 was pressed: served at the same safe point
     schedule(hw::kEventVblank, now() + frame_cycles(), vblank);
 }
@@ -583,6 +589,12 @@ bool load_state(const std::uint8_t *data, std::size_t size) {
         std::fprintf(stderr, "[state] cannot load: %s\n", e.what());
         return false;
     }
+}
+
+bool request_restart() {
+    if (g_boot_state.empty()) return false;
+    g_restart_request = g_state_request = true;
+    return true;
 }
 
 bool load_state(const std::string &path) {
@@ -851,6 +863,21 @@ int run() {
             if (g_file_state_request) {
                 g_file_state_request = false;
                 save_state(g_options.save_state_path);
+            }
+            if (g_boot_capture) {
+                g_boot_capture = false;
+                try {
+                    state::Writer w;
+                    machine_state(w);
+                    g_boot_state.swap(w.out);
+                } catch (const std::exception &e) {
+                    std::fprintf(stderr, "[exec] cannot keep the start of the program: %s\n", e.what());
+                }
+            }
+            if (g_restart_request) {
+                g_restart_request = false;
+                if (!load_state(g_boot_state.data(), g_boot_state.size())) halt("program asked to run another executable");
+                if (g_halted) break;
             }
             quick::service();
         }

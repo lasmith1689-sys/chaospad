@@ -547,7 +547,14 @@ void handle_syscall(Cpu &c, std::uint32_t pc) {
     switch (n) {
     case 0x02: hw::gs_set_crt(arg(c, 0), arg(c, 1), arg(c, 2)); ret(c, 0); break;
     case 0x04: halt("Exit"); break;
-    case 0x06: case 0x07: halt("program asked to run another executable"); break;
+    case 0x06: case 0x07:
+        if (request_restart()) {
+            std::fprintf(stderr, "[exec] %s at frame %llu: this build holds one program, so it starts again from its second frame\n", syscall_name(n),
+                         static_cast<unsigned long long>(frame_count()));
+            break;
+        }
+        halt("program asked to run another executable");
+        break;
     case 0x10: add_handler(c, g_intc_handlers); break;
     case 0x11: remove_handler(c, g_intc_handlers); break;
     case 0x12: add_handler(c, g_dmac_handlers); break;

@@ -122,6 +122,9 @@ void halt(const std::string &reason);
 bool save_state(const std::string &path);
 bool load_state(const std::string &path);
 bool load_state(const std::uint8_t *data, std::size_t size);
+// The game asked for another program (LoadExecPS2): start this one again from its second frame, at the next safe point. False when
+// there is no copy of that frame (PS2_EXEC_RESTART=0, or the request came before it).
+bool request_restart();
 bool halted();
 const std::string &halt_reason();
 std::uint64_t frame_count();

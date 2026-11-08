@@ -2133,6 +2133,21 @@ static bool open_backend([[maybe_unused]] std::uint32_t backends, const char *na
     WGPULimits limits = WGPU_LIMITS_INIT;
     limits.maxStorageBufferBindingSize = supported.maxStorageBufferBindingSize;
     limits.maxBufferSize = supported.maxBufferSize;
+    // The GS passes bind up to 7 storage buffers in one compute stage. WebGPU's default is 8, but an adapter that wgpu counts as
+    // "downlevel" (Apple's iOS GPUs, the iOS Simulator) gets 4 unless more are asked for: ask for what the adapter has.
+    limits.maxStorageBuffersPerShaderStage = supported.maxStorageBuffersPerShaderStage;
+    limits.maxStorageTexturesPerShaderStage = supported.maxStorageTexturesPerShaderStage;
+    limits.maxSampledTexturesPerShaderStage = supported.maxSampledTexturesPerShaderStage;
+    limits.maxUniformBuffersPerShaderStage = supported.maxUniformBuffersPerShaderStage;
+    limits.maxComputeWorkgroupStorageSize = supported.maxComputeWorkgroupStorageSize;
+    limits.maxComputeInvocationsPerWorkgroup = supported.maxComputeInvocationsPerWorkgroup;
+    limits.maxComputeWorkgroupSizeX = supported.maxComputeWorkgroupSizeX;
+    limits.maxComputeWorkgroupSizeY = supported.maxComputeWorkgroupSizeY;
+    limits.maxComputeWorkgroupSizeZ = supported.maxComputeWorkgroupSizeZ;
+    limits.maxComputeWorkgroupsPerDimension = supported.maxComputeWorkgroupsPerDimension;
+    std::fprintf(stderr, "[gpu] adapter limits: %u storage buffers per stage, %u bytes of workgroup memory, %u invocations per workgroup, buffers up to %llu MB\n",
+                 supported.maxStorageBuffersPerShaderStage, supported.maxComputeWorkgroupStorageSize, supported.maxComputeInvocationsPerWorkgroup,
+                 static_cast<unsigned long long>(supported.maxStorageBufferBindingSize >> 20));
     WGPUDeviceDescriptor dd = WGPU_DEVICE_DESCRIPTOR_INIT;
     dd.requiredLimits = &limits;
     WGPUFeatureName features[2];
