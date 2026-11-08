@@ -107,11 +107,18 @@ constexpr const char *kFont[95] = {
     "..... ..... .#... #.#.# ...#. ..... ..... .....",  // ~
 };
 
+#ifdef PS2_IOS
+// a phone has no keyboard, no window to resize and no quit button: only what a finger can use
+constexpr int kEntries = 5;
+constexpr Command kCommands[kEntries] = {Command::resume, Command::save, Command::load, Command::look, Command::scale};
+constexpr const char *kKeys[kEntries] = {"", "", "", "", ""};
+#else
 constexpr int kEntries = 9;
 constexpr Command kCommands[kEntries] = {Command::resume, Command::save,       Command::load, Command::look,       Command::scale,
                                          Command::fullscreen, Command::keys, Command::change_keys, Command::quit};
 // the program's key for the same thing, shown dim at the right end of the entry
 constexpr const char *kKeys[kEntries] = {"F1", "F5", "F8", "F2", "", "F11", "", "", ""};
+#endif
 constexpr int kVisibleRows = 11;  // lines of the keys page shown at once; the page scrolls
 constexpr int kKeysPageChars = 58;
 

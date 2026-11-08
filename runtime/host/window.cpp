@@ -185,6 +185,14 @@ void refresh_title() {
     if (!g_notice_text.empty()) title = g_notice_text + "   |   " + title;
     if (!g_game_title.empty()) title = g_game_title + "   |   " + title;
     SDL_SetWindowTitle(g_window, title.c_str());
+#ifdef PS2_IOS
+    // a phone shows no title: the speed line goes into log.txt every 10 s instead
+    static Uint32 logged = 0;
+    if (SDL_GetTicks() - logged >= 10000) {
+        logged = SDL_GetTicks();
+        std::fprintf(stderr, "[speed] frame %llu: %s\n", static_cast<unsigned long long>(ps2::frames_run()), g_speed_title.c_str());
+    }
+#endif
 }
 
 bool create_renderer() {
