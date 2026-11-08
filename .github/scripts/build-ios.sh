@@ -68,18 +68,29 @@ ditto "$app" "$work/ChaosPad.app"
 app="$work/ChaosPad.app"
 plutil -lint "$app/Info.plist"
 
+if [ "${CHAOSPAD_ASSET_PACKS:-1}" = 1 ]; then
 echo "▶ Background Assets downloader extension (Apple-hosted asset packs, iOS 26)"
 ext="$app/Extensions/ChaosPadDownloader.appex"
 mkdir -p "$ext"
 # (linked like Xcode's extensionkit-extension product type, whose LD_ENTRY_POINT is _NSExtensionMain)
-xcrun --sdk $sysroot swiftc -target $triple -parse-as-library -application-extension -O -module-name ChaosPadDownloader \
-  -Xlinker -e -Xlinker _NSExtensionMain -Xlinker -application_extension \
-  "$root/ios/downloader/DownloaderExtension.swift" -o "$ext/ChaosPadDownloader"
+xcrun --sdk $sysroot swiftc -target $triple -parse-as-library -application-extension -O -module-name ChaosPadDownloader   -Xlinker -e -Xlinker _NSExtensionMain -Xlinker -application_extension   "$root/ios/downloader/DownloaderExtension.swift" -o "$ext/ChaosPadDownloader"
 sed -e "s|@BUNDLE_ID@|$bundle.downloader|" -e "s|@PLATFORM@|$platform|" "$root/ios/downloader/Info.plist" > "$ext/Info.plist"
 plutil -lint "$ext/Info.plist"
 # entitlements for signing (testflight.sh, simulator-check.sh): the app group of both bundles
 sed "s|@APP_GROUP@|$group|" "$root/ios/ChaosPad.entitlements" > "$work/ChaosPad.entitlements"
 sed "s|@APP_GROUP@|$group|" "$root/ios/downloader/ChaosPadDownloader.entitlements" > "$work/ChaosPadDownloader.entitlements"
+else
+# CHAOSPAD_ASSET_PACKS=0: no asset pack, so no downloader extension and no app group (signing needs the group assigned to the
+# App ID on the developer site first); the disc then comes from the app's folder in the Files app
+echo "▶ No Background Assets (CHAOSPAD_ASSET_PACKS=0): the disc comes from the app's Documents folder"
+for key in BAAppGroupID BAHasManagedAssetPacks BAUsesAppleHosting; do /usr/libexec/PlistBuddy -c "Delete :$key" "$app/Info.plist" || true; done
+printf '<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict/>
+</plist>
+' > "$work/ChaosPad.entitlements"
+fi
 
 echo "▶ App icon"
 icons="$work/Assets.xcassets/AppIcon.appiconset"

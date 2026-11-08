@@ -36,6 +36,9 @@ env:
   CHAOSPAD_APPLE_ID: '6832349033'
   # the app group of the app and its downloader extension: GoWPad's for now (it exists; group.com.lasmith1689.chaospad does not yet)
   CHAOSPAD_APP_GROUP: group.com.lasmith1689.gowpad
+  # 0 until the app group is assigned to the App IDs on the developer site (cloud signing cannot do that): no downloader extension,
+  # the disc comes from the app's folder in the Files app
+  CHAOSPAD_ASSET_PACKS: '0'
 
 jobs:
   assetpacks:

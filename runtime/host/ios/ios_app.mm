@@ -109,6 +109,10 @@ bool asset_pack_file(const char *pack, const char *file, std::string &path) {
     return false;
 #else
     if (!*pack || !*file) return false;
+    if (![[NSBundle.mainBundle objectForInfoDictionaryKey:@"BAUsesAppleHosting"] boolValue]) {
+        std::fprintf(stderr, "[ios-assets] this build has no asset packs (no Background Assets keys in Info.plist)\n");
+        return false;
+    }
     if (@available(iOS 26.0, *)) {
         BAAssetPackManager *manager = [BAAssetPackManager sharedManager];
         NSString *identifier = [NSString stringWithUTF8String:pack];
