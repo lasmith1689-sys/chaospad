@@ -25,7 +25,8 @@ case "$target" in
   *) echo "::error::target must be device or simulator"; exit 1 ;;
 esac
 bundle=${CHAOSPAD_BUNDLE_ID:-com.lasmith1689.chaospad}
-group="group.$bundle"  # shared by the app and its Background Assets downloader extension
+# shared by the app and its Background Assets downloader extension (CHAOSPAD_APP_GROUP: an existing group of the team)
+group=${CHAOSPAD_APP_GROUP:-group.$bundle}
 
 echo "▶ Third-party sources (checked against their SHA-256)"
 fetch() {  # url sha256 file

@@ -34,6 +34,8 @@ env:
   HOMEBREW_NO_AUTO_UPDATE: '1'
   CHAOSPAD_BUNDLE_ID: com.lasmith1689.chaospad
   CHAOSPAD_APPLE_ID: '6832349033'
+  # the app group of the app and its downloader extension: GoWPad's for now (it exists; group.com.lasmith1689.chaospad does not yet)
+  CHAOSPAD_APP_GROUP: group.com.lasmith1689.gowpad
 
 jobs:
   assetpacks:
