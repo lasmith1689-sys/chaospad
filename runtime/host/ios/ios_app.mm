@@ -11,6 +11,7 @@
 // Compiled with ARC.
 #import <BackgroundAssets/BackgroundAssets.h>
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #include <TargetConditionals.h>
 
 #include <cerrno>
@@ -66,6 +67,37 @@ bool wait_for(dispatch_semaphore_t done, double seconds) {
     return true;
 }
 
+// A plain screen with one line of text, shown while the app waits for its disc before the game (and SDL's window) starts.
+UIWindow *g_wait_window = nil;
+UILabel *g_wait_label = nil;
+void show_wait(NSString *text) {
+    if (!g_wait_window) {
+        UIWindowScene *scene = nil;
+        for (UIScene *candidate in UIApplication.sharedApplication.connectedScenes)
+            if ([candidate isKindOfClass:UIWindowScene.class]) scene = (UIWindowScene *)candidate;
+        g_wait_window = scene ? [[UIWindow alloc] initWithWindowScene:scene] : [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+        UIViewController *controller = [UIViewController new];
+        controller.view.backgroundColor = UIColor.blackColor;
+        g_wait_label = [[UILabel alloc] initWithFrame:CGRectInset(controller.view.bounds, 48, 48)];
+        g_wait_label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        g_wait_label.textColor = [UIColor colorWithRed:0.55 green:0.95 blue:0.6 alpha:1.0];
+        g_wait_label.textAlignment = NSTextAlignmentCenter;
+        g_wait_label.numberOfLines = 0;
+        g_wait_label.font = [UIFont systemFontOfSize:20 weight:UIFontWeightMedium];
+        [controller.view addSubview:g_wait_label];
+        g_wait_window.rootViewController = controller;
+        [g_wait_window makeKeyAndVisible];
+    }
+    g_wait_label.text = text;
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, true);
+}
+void hide_wait() {
+    if (!g_wait_window) return;
+    g_wait_window.hidden = YES;
+    g_wait_window = nil;
+    g_wait_label = nil;
+}
+
 // The path of `file` in Apple-hosted asset pack `pack` (iOS 26), once the pack is on the device: a path the app can open, or
 // /dev/fd/<n> for the descriptor the system opens for it (the runtime seeks before every read, so a shared offset is fine).
 bool asset_pack_file(const char *pack, const char *file, std::string &path) {
@@ -95,6 +127,7 @@ bool asset_pack_file(const char *pack, const char *file, std::string &path) {
         }
         std::fprintf(stderr, "[ios-assets] %s version %ld, %lld bytes\n", pack, static_cast<long>(found.version), static_cast<long long>(found.downloadSize));
         // returns at once for a pack on the device; a missing one is downloaded now (the essential pack normally came with the app)
+        show_wait(@"Getting the game's disc ready.\nIf it is still downloading, keep the app open: the game starts by itself when it is done.");
         __block NSError *availability = nil;
         dispatch_semaphore_t ready = dispatch_semaphore_create(0);
         [manager ensureLocalAvailabilityOfAssetPack:found
@@ -186,8 +219,22 @@ std::vector<std::string> ps2_ios_arguments() {
             break;
         }
     }
-    if (disc.empty() && !asset_pack_file(PS2_IOS_ASSET_PACK, PS2_IOS_DISC_FILE, disc))
-        std::fprintf(stderr, "[ios] no disc: neither the app's asset pack nor a .iso in Documents (Files app, On My iPhone)\n");
+    // no disc yet: say so and look again every 15 s (the asset pack still downloading, or the player copying a disc image in)
+    for (int attempt = 0; disc.empty(); ++attempt) {
+        if (asset_pack_file(PS2_IOS_ASSET_PACK, PS2_IOS_DISC_FILE, disc)) break;
+        std::fprintf(stderr, "[ios] no disc: neither the app's asset pack nor a .iso in Documents (Files app, On My iPhone); attempt %d\n", attempt + 1);
+#if TARGET_OS_SIMULATOR
+        break;  // (the simulator check also starts the game without a disc)
+#endif
+        show_wait(@"The game's disc is not on this iPhone yet.\n\nIt downloads with the app from TestFlight: keep the app open and online.\nOr copy a disc image (.iso) into the app's folder in the Files app.");
+        const CFAbsoluteTime until = CFAbsoluteTimeGetCurrent() + 15.0;
+        while (CFAbsoluteTimeGetCurrent() < until) CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, true);
+        for (const auto &entry : fs::directory_iterator(docs, ec)) {
+            const std::string ext = lower(entry.path().extension().string());
+            if (entry.is_regular_file(ec) && (ext == ".iso" || ext == ".sparse")) disc = entry.path().string();
+        }
+    }
+    hide_wait();
     if (!disc.empty()) {
         args.push_back("--disc");
         args.push_back(disc);
