@@ -1,0 +1,380 @@
+#include "ps2/disc.hpp"
+#include "ps2/hitch.hpp"
+#include "ps2/os.hpp"
+#include "load_stats.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstring>
+#include <map>
+#include <set>
+#include <iterator>
+#include <string_view>
+#include <vector>
+
+namespace ps2::disc {
+
+namespace {
+
+std::FILE *g_file = nullptr;
+Reader g_reader;
+Probe g_probe;
+std::uint64_t g_size = 0;
+std::uint32_t g_layer1 = 0;
+std::map<std::string, Entry> g_index;
+bool g_indexed = false;  // the reads while the file system is being read are not the game's
+
+std::uint32_t u32(const std::uint8_t *p) {
+    std::uint32_t v;
+    std::memcpy(&v, p, 4);
+    return v;
+}
+
+std::string upper(std::string s) {
+    for (char &c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return s;
+}
+
+// The image is untrusted (a damaged rip, or a crafted file): a directory that cannot be right is left out with one line, never
+// read past its buffer. No real directory is near this size (a record is at least 34 bytes: 16 MiB is half a million names).
+constexpr std::uint32_t kMaxDirectory = 16u << 20;
+
+void damaged(const std::string &prefix, std::uint32_t sector, const char *why) {
+    static int lines = 0;
+    if (lines++ < 20) std::fprintf(stderr, "[disc] damaged directory '%s' at sector %u: %s (left out)\n", prefix.c_str(), sector, why);
+}
+
+void walk(std::uint32_t base, std::uint32_t lba, std::uint32_t size, const std::string &prefix, int depth, std::set<std::uint64_t> &seen) {
+    if (depth > 16) return;
+    // A directory that points back at itself or at a parent would be walked again and again: each extent is walked once.
+    if (!seen.insert(std::uint64_t{base} + lba).second) return;
+    if (size > kMaxDirectory) return damaged(prefix, base + lba, "too large");
+    std::vector<std::uint8_t> data((size + kSector - 1) / kSector * kSector);
+    if (!read(base + lba, static_cast<std::uint32_t>(data.size() / kSector), data.data())) return;
+    std::size_t off = 0;
+    while (off < size) {
+        const std::uint8_t length = data[off];
+        if (!length) {
+            off = (off / kSector + 1) * kSector;
+            continue;
+        }
+        // ISO 9660 (ECMA-119 9.1): a directory record is 33 bytes plus the name (at least one byte), all inside the directory.
+        if (length < 34 || off + length > data.size()) return damaged(prefix, base + lba, "a record runs past its end");
+        const std::uint8_t *rec = &data[off];
+        off += length;
+        const std::uint8_t name_len = rec[32];
+        if (33u + name_len > length) {
+            damaged(prefix, base + lba, "a name runs past its record");
+            continue;
+        }
+        std::string name(reinterpret_cast<const char *>(rec + 33), name_len);
+        if (name_len == 1 && (name[0] == 0 || name[0] == 1)) continue;
+        const auto semi = name.find(';');
+        if (semi != std::string::npos) name = name.substr(0, semi);
+        const std::string path = prefix + upper(name);
+        const bool dir = rec[25] & 2;
+        const Entry entry{base + u32(rec + 2), u32(rec + 10), dir};
+        g_index[path] = entry;
+        if (dir) walk(base, u32(rec + 2), u32(rec + 10), path + "/", depth + 1, seen);
+    }
+}
+
+void index_layer(std::uint32_t pvd_sector, std::uint32_t base) {
+    std::uint8_t pvd[kSector];
+    if (!read(pvd_sector, 1, pvd) || std::memcmp(pvd, "\x01" "CD001", 6) != 0) return;
+    const std::uint32_t root_lba = u32(pvd + 158);
+    std::uint32_t root_size = u32(pvd + 166);
+    if (root_size < 34) {
+        std::uint8_t sec[kSector];
+        if (read(base + root_lba, 1, sec) && sec[0] >= 34 && u32(sec + 2) == root_lba)
+            root_size = u32(sec + 10);
+    }
+    std::set<std::uint64_t> seen;
+    walk(base, root_lba, root_size, "", 0, seen);
+}
+
+void self_check();
+
+}
+
+bool open(const std::string &path) {
+    std::FILE *file = os::open(path, "rb");
+    if (!file) return false;
+#if defined(_WIN32)
+    const long long end = _fseeki64(file, 0, SEEK_END) == 0 ? _ftelli64(file) : -1;
+#else
+    const long long end = fseeko(file, 0, SEEK_END) == 0 ? static_cast<long long>(ftello(file)) : -1;
+#endif
+    if (end < 0) {
+        std::fprintf(stderr, "[disc] %s: cannot find the size of the image\n", path.c_str());
+        std::fclose(file);
+        return false;
+    }
+    // A second image (a disc swap) replaces the first: its file is closed once the reader no longer uses it, so it is neither
+    // leaked nor kept locked.
+    std::FILE *previous = g_file;
+    g_file = file;
+    // A sparse image (scripts/mksparse.py, made for phones): the sectors of the disc that hold data, at their own offsets in the
+    // file, behind a table of extents; every other sector reads as zeros. Header "PS2SPRS1", the disc's size (u64), the number of
+    // extents (u32), 4 bytes free, then per extent: first sector (u32), sectors (u32), offset in the file (u64), sorted by sector.
+    struct Extent {
+        std::uint32_t sector, count;
+        std::uint64_t offset;
+    };
+    std::vector<Extent> extents;
+    std::uint64_t logical = static_cast<std::uint64_t>(end);
+    {
+        std::uint8_t head[24] = {};
+        const auto seek = [file](std::uint64_t at) {
+#if defined(_WIN32)
+            return _fseeki64(file, static_cast<long long>(at), SEEK_SET) == 0;
+#else
+            return fseeko(file, static_cast<off_t>(at), SEEK_SET) == 0;
+#endif
+        };
+        if (end >= 24 && seek(0) && std::fread(head, 1, 24, file) == 24 && std::memcmp(head, "PS2SPRS1", 8) == 0) {
+            std::uint32_t count = 0;
+            std::memcpy(&logical, head + 8, 8);
+            std::memcpy(&count, head + 16, 4);
+            extents.resize(count);
+            bool ok = count > 0 && count < (1u << 24);
+            for (std::uint32_t i = 0; ok && i < count; ++i) {
+                std::uint8_t e[16];
+                ok = std::fread(e, 1, 16, file) == 16;
+                std::memcpy(&extents[i].sector, e, 4);
+                std::memcpy(&extents[i].count, e + 4, 4);
+                std::memcpy(&extents[i].offset, e + 8, 8);
+                ok = ok && (i == 0 || extents[i].sector >= extents[i - 1].sector + extents[i - 1].count) &&
+                     extents[i].offset + static_cast<std::uint64_t>(extents[i].count) * kSector <= static_cast<std::uint64_t>(end);
+            }
+            if (!ok) {
+                std::fprintf(stderr, "[disc] %s: a damaged sparse image\n", path.c_str());
+                g_file = previous;
+                std::fclose(file);
+                return false;
+            }
+            std::fprintf(stderr, "[disc] %s: sparse image, %u extents, %llu bytes of disc\n", path.c_str(), count,
+                         static_cast<unsigned long long>(logical));
+        }
+    }
+    if (!extents.empty()) {
+        const bool opened = open(path, logical, [file, extents = std::move(extents)](std::uint64_t offset, void *out, std::size_t bytes) -> std::size_t {
+            std::uint8_t *to = static_cast<std::uint8_t *>(out);
+            std::size_t done = 0;
+            while (done < bytes) {
+                const std::uint64_t at = offset + done;
+                const std::uint32_t sector = static_cast<std::uint32_t>(at / kSector);
+                // the last extent that starts at or before this sector
+                auto it = std::upper_bound(extents.begin(), extents.end(), sector, [](std::uint32_t s, const Extent &e) { return s < e.sector; });
+                std::size_t chunk = bytes - done;
+                if (it != extents.begin() && sector < std::prev(it)->sector + std::prev(it)->count) {
+                    const Extent &e = *std::prev(it);
+                    const std::uint64_t extent_end = static_cast<std::uint64_t>(e.sector + e.count) * kSector;
+                    chunk = static_cast<std::size_t>(std::min<std::uint64_t>(chunk, extent_end - at));
+                    const std::uint64_t from = e.offset + (at - static_cast<std::uint64_t>(e.sector) * kSector);
+#if defined(_WIN32)
+                    if (_fseeki64(file, static_cast<long long>(from), SEEK_SET) != 0) return done;
+#else
+                    if (fseeko(file, static_cast<off_t>(from), SEEK_SET) != 0) return done;
+#endif
+                    if (std::fread(to + done, 1, chunk, file) != chunk) return done;
+                } else {
+                    // a hole up to the next extent (or the end of the disc)
+                    const std::uint64_t next = it == extents.end() ? ~0ull : static_cast<std::uint64_t>(it->sector) * kSector;
+                    chunk = static_cast<std::size_t>(std::min<std::uint64_t>(chunk, next - at));
+                    std::memset(to + done, 0, chunk);
+                }
+                done += chunk;
+            }
+            return done;
+        });
+        if (previous) std::fclose(previous);
+        return opened;
+    }
+    const bool opened = open(path, static_cast<std::uint64_t>(end), [file](std::uint64_t offset, void *out, std::size_t bytes) -> std::size_t {
+        // A failed seek reads nothing (read() then says "short read") instead of the sectors at the old position.
+#if defined(_WIN32)
+        if (_fseeki64(file, static_cast<long long>(offset), SEEK_SET) != 0) return 0;
+#else
+        if (fseeko(file, static_cast<off_t>(offset), SEEK_SET) != 0) return 0;
+#endif
+        return std::fread(out, 1, bytes, file);
+    });
+    if (previous) std::fclose(previous);
+    return opened;
+}
+
+bool open(const std::string &name, std::uint64_t size, Reader reader, Probe probe) {
+    g_reader = std::move(reader);
+    g_probe = std::move(probe);
+    g_size = size;
+    g_layer1 = 0;  // a second image without a second layer must not keep the first one's
+    g_index.clear();
+    g_indexed = false;
+    index_layer(16, 0);
+    std::uint8_t pvd[kSector];
+    read(16, 1, pvd);
+    const std::uint32_t layer0 = u32(pvd + 80);
+    for (std::uint32_t s = layer0; s < layer0 + 64 && static_cast<std::uint64_t>(s) * kSector < g_size; ++s) {
+        std::uint8_t probe[kSector];
+        if (read(s, 1, probe) && std::memcmp(probe, "\x01" "CD001", 6) == 0) {
+            g_layer1 = s - 16;
+            index_layer(s, g_layer1);
+            break;
+        }
+    }
+    std::fprintf(stderr, "[disc] %s: %zu files, %llu sectors, layer 1 at %u\n", name.c_str(), g_index.size(),
+                 static_cast<unsigned long long>(g_size / kSector), g_layer1);
+    g_indexed = true;
+    if (!os::env("PS2_DISC_CHECK").empty()) self_check();
+    return true;
+}
+
+bool is_open() { return static_cast<bool>(g_reader); }
+
+bool read(std::uint32_t sector, std::uint32_t count, void *out) {
+    if (!g_reader) return false;
+    const cost::Timer time_it(cost::kDisc);
+    const std::size_t want = static_cast<std::size_t>(count) * kSector;
+    if (cost::g_on) cost::g_disc_bytes += want;
+    const auto started = hitch::on() ? hitch::Clock::now() : hitch::Clock::time_point{};
+    const std::size_t got = g_reader(static_cast<std::uint64_t>(sector) * kSector, out, want);
+    if (hitch::on()) {  // PS2_HITCH_LOG=<ms>: a disc read that held the game up (one third of the limit, since a frame has other work too)
+        const double ms = hitch::ms_since(started);
+        if (ms > hitch::threshold_ms() / 3) std::fprintf(stderr, "[hitch] disc read of %u sectors at sector %u (%.1f MB) took %.1f ms\n", count, sector, want / 1048576.0, ms);
+    }
+    if (got < want) std::memset(static_cast<std::uint8_t *>(out) + got, 0, want - got);
+    // A game on a two-layer disc reads the second layer with the same sector numbers, which simply continue: the layer
+    // boundary is not a gap in the image. Say so once, and say it when a read comes back short (the rest is filled with
+    // zeros, which would otherwise go unnoticed). PS2_TRACE_DISC=1 prints every read in layer 1 and past the 4 GiB line.
+    static const bool trace = !os::env("PS2_TRACE_DISC").empty();
+    static std::uint32_t short_reads = 0, layer1_reads = 0;
+    if (g_indexed && g_layer1 && count && sector + count > g_layer1 && (!layer1_reads++ || trace))
+        std::fprintf(stderr, "[disc] read in layer 1: sector %u count %u (read %u)\n", sector, count, layer1_reads);
+    if (got < want && count && short_reads++ < 20)
+        std::fprintf(stderr, "[disc] short read: sector %u count %u, %zu of %zu bytes (the rest is zero)\n", sector, count, got, want);
+    return got > 0 || !count;
+}
+
+namespace {
+
+// FNV-1a of one sector, to compare with the same sector read by another program (scripts/disc.py reads the image with
+// plain Python). The 4 GiB line lies in the second layer of a two-layer disc, and a read there is the one a 32-bit offset
+// would get wrong.
+std::uint64_t checksum(std::uint32_t sector) {
+    std::uint8_t data[kSector];
+    read(sector, 1, data);
+    std::uint64_t h = 0xCBF29CE484222325ull;
+    for (const std::uint8_t b : data) h = (h ^ b) * 0x100000001B3ull;
+    return h;
+}
+
+void self_check() {
+    const std::uint32_t last = static_cast<std::uint32_t>(g_size / kSector ? g_size / kSector - 1 : 0);
+    for (const std::uint32_t s : {0u, 16u, g_layer1, g_layer1 + 16u, (1u << 21) - 1u, 1u << 21, (1u << 21) + 1u, last})
+        if (s <= last) std::fprintf(stderr, "[disc-check] sector %u fnv1a %016llx\n", s, static_cast<unsigned long long>(checksum(s)));
+    for (const auto &[path, entry] : g_index)
+        if (g_layer1 && !entry.directory && entry.sector >= g_layer1) {
+            const std::uint32_t end = entry.sector + (entry.size ? (entry.size - 1) / kSector : 0);
+            std::fprintf(stderr, "[disc-check] layer 1 file %s: sectors %u to %u, first %016llx, last %016llx\n", path.c_str(), entry.sector, end,
+                         static_cast<unsigned long long>(checksum(entry.sector)), static_cast<unsigned long long>(checksum(end)));
+        }
+}
+
+}
+
+bool ready(std::uint32_t sector, std::uint32_t count) {
+    return !g_probe || g_probe(static_cast<std::uint64_t>(sector) * kSector, static_cast<std::size_t>(count) * kSector);
+}
+
+std::optional<Entry> find(const std::string &raw) {
+    std::string path = raw;
+    const auto colon = path.find(':');
+    if (colon != std::string::npos) path = path.substr(colon + 1);
+    std::replace(path.begin(), path.end(), '\\', '/');
+    const auto semi = path.find(';');
+    if (semi != std::string::npos) path = path.substr(0, semi);
+    while (!path.empty() && path.front() == '/') path.erase(path.begin());
+    auto it = g_index.find(upper(path));
+    if (it == g_index.end()) return std::nullopt;
+    return it->second;
+}
+
+namespace {
+
+bool read_boot_file(const std::string &path, std::size_t limit, std::vector<std::uint8_t> &out, std::string &why) {
+    const auto entry = find(path);
+    if (!entry || entry->directory) {
+        why = path + ": file not found in the disc image";
+        return false;
+    }
+    const std::uint64_t offset = std::uint64_t{entry->sector} * kSector;
+    if (!entry->size || entry->size > limit || offset > g_size || entry->size > g_size - offset) {
+        why = path + ": empty, too large or outside the disc image";
+        return false;
+    }
+    out.resize(entry->size);
+    // Boot is host I/O. Guest read() pads short sector reads with zeroes; here every file byte must be present.
+    if (g_reader(offset, out.data(), out.size()) != out.size()) {
+        out.clear();
+        why = path + ": short read from the disc image";
+        return false;
+    }
+    return true;
+}
+
+std::string_view trim_boot_value(std::string_view text) {
+    const auto begin = text.find_first_not_of(" \t\r\n");
+    return begin == std::string_view::npos ? std::string_view{} : text.substr(begin, text.find_last_not_of(" \t\r\n") - begin + 1);
+}
+
+}
+
+bool read_boot_elf(std::string &program, std::vector<std::uint8_t> &elf, std::string &why) {
+    program.clear();
+    elf.clear();
+    why.clear();
+    if (!is_open()) {
+        why = "no disc image is open";
+        return false;
+    }
+    // These are host allocation limits for untrusted file metadata, not PS2 hardware limits.
+    std::vector<std::uint8_t> cnf;
+    if (!read_boot_file("SYSTEM.CNF", 64u << 10, cnf, why)) return false;
+    std::string_view text(reinterpret_cast<const char *>(cnf.data()), cnf.size());
+    if (text.starts_with("\xEF\xBB\xBF")) text.remove_prefix(3);
+    text = text.substr(0, text.find('\0'));  // tolerate a padded configuration file
+    while (!text.empty()) {
+        const auto end = text.find('\n');
+        const auto line = text.substr(0, end);
+        text = end == std::string_view::npos ? std::string_view{} : text.substr(end + 1);
+        const auto equal = line.find('=');
+        if (equal == std::string_view::npos || upper(std::string(trim_boot_value(line.substr(0, equal)))) != "BOOT2") continue;
+        const auto value = trim_boot_value(line.substr(equal + 1));
+        const auto colon = value.find(':');
+        if (value.empty() || (colon != std::string_view::npos && upper(std::string(value.substr(0, colon))) != "CDROM0")) {
+            why = "SYSTEM.CNF: BOOT2 must name a file on cdrom0";
+            return false;
+        }
+        const std::string path(value);
+        std::vector<std::uint8_t> bytes;
+        if (!read_boot_file(path, 128u << 20, bytes, why)) return false;
+        if (bytes.size() < 52 || std::memcmp(bytes.data(), "\x7F" "ELF\x01\x01", 6) != 0) {
+            why = path + ": not a little endian ELF32 file";
+            return false;
+        }
+        program = path;
+        if (colon == std::string_view::npos)
+            program = std::string("cdrom0:") + ((path.front() == '\\' || path.front() == '/') ? "" : "\\") + path;
+        elf = std::move(bytes);
+        return true;
+    }
+    why = "SYSTEM.CNF does not name a BOOT2 program";
+    return false;
+}
+
+std::uint32_t layer1_start() { return g_layer1; }
+std::uint64_t sector_count() { return g_size / kSector; }
+
+}
