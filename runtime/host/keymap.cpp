@@ -159,6 +159,8 @@ std::string with_look(const std::string &file_text, int look) { return with_line
 
 std::string with_scale(const std::string &file_text, int scale) { return with_line(file_text, "scale", "scale = " + std::to_string(scale)); }
 
+std::string with_brightness(const std::string &file_text, int level) { return with_line(file_text, "brightness", "brightness = " + std::to_string(level)); }
+
 bool is_reserved(int input) {
     return input == SDL_SCANCODE_F1 || input == SDL_SCANCODE_F2 || input == SDL_SCANCODE_F5 || input == SDL_SCANCODE_F8 || input == SDL_SCANCODE_F9 || input == SDL_SCANCODE_F11;
 }
@@ -274,6 +276,12 @@ void parse(const std::string &text, Config &config, std::vector<std::string> &pr
             else bad("scale is 1, 2 or 3, ignored");
             continue;
         }
+        if (name == "brightness") {
+            const std::string v = squash(value);
+            if (v.size() == 1 && v[0] >= '0' && v[0] <= '4') config.brightness = v[0] - '0';
+            else bad("brightness is 0 to 4, ignored");
+            continue;
+        }
         if (name == "mousespeed") {
             char *tail = nullptr;
             const double v = std::strtod(value.c_str(), &tail);
@@ -366,7 +374,10 @@ std::string default_file_text() {
         "look = " + std::string(look_word(kDefaultLook)) + "\n"
         "\n# The inner resolution: 1, 2 or 3 times the console's (sharper, and more work for the graphics chip). Used when the game\n"
         "# starts; the quick menu (F1) writes it here. The environment variable PS2_SCALE, when it is set, wins over this line.\n"
-        "# scale = 1\n";
+        "# scale = 1\n"
+        "\n# A brightness boost for dark scenes, 0 (none) to 4 (the most): it lifts the dark parts of the picture more than the light\n"
+        "# ones. The quick menu (F1) writes it here.\n"
+        "# brightness = 0\n";
     return t;
 }
 

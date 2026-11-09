@@ -143,6 +143,11 @@ int g_last_dx = 0, g_last_dy = -1;  // the last direction the walk keys gave, fo
 // change). The choice sits in keys.ini ('look = ...'); PS2_LOOK=0..5 or a look word overrides it for a run and is not written.
 int g_look = keymap::kDefaultLook;
 bool g_look_forced = false;
+// The brightness boost (quick menu, keys.ini 'brightness'): 0 none to 4; the present pass lifts the dark parts of the picture.
+int g_brightness = 0;
+
+// The picture options the present pass reads (ps2/video.hpp): the look in the low bits, the brightness boost in bits 8 to 11.
+void apply_video_options() { ps2::set_video_options(static_cast<std::uint32_t>(g_look) | static_cast<std::uint32_t>(g_brightness) << 8); }
 
 // The title shows the speed; for a few seconds after F5, F8 or F9 a message is put in front of it.
 std::string g_speed_title = "ps2-native-recomp";
@@ -546,7 +551,8 @@ void load_keys() {
     g_keys = config;
     if (!g_look_forced && config.look >= 0) g_look = config.look;
     g_keys.look = g_look;
-    ps2::set_video_options(static_cast<std::uint32_t>(g_look));
+    if (config.brightness >= 0) g_brightness = config.brightness;
+    apply_video_options();
     remember_keys_time();
     std::fprintf(stderr, "[keys] %s: %s%zu problem%s; mouse stick %s\n", g_keys_path.c_str(), have ? "read, " : "defaults, ", problems.size(),
                  problems.size() == 1 ? "" : "s", g_keys.mouse_stick == 0 ? "off" : g_keys.mouse_stick == 1 ? "left" : "right");
@@ -899,7 +905,7 @@ void rewrite_keys_file(const std::function<std::string(const std::string &)> &ch
 void cycle_look(int step = 1) {
     g_look = (g_look + step + keymap::kLookCount) % keymap::kLookCount;
     g_keys.look = g_look;
-    ps2::set_video_options(static_cast<std::uint32_t>(g_look));
+    apply_video_options();
     g_notice_text = std::string("Picture look (F2): ") + keymap::look_name(g_look);
     g_notice_until = SDL_GetTicks() + 4000;
     refresh_title();
@@ -939,6 +945,7 @@ void menu_paint(bool show_again = true) {
         v.scale_now = g_scale_now;
         v.scale_next = g_scale_next;
         v.scale_locked = g_scale_locked;
+        v.brightness = g_brightness;
         v.fullscreen = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN;
         if (g_menu.on_keys_page()) {
             for (int a = 0; a < keymap::kChangeableCount; ++a) v.key_rows.push_back({keymap::action_label(a), keymap::keys_text(g_keys, a)});
@@ -1115,6 +1122,14 @@ void menu_command(quickmenu::Command c, int step) {
         ps2::quick_request(ps2::QuickKey::load);
         return;
     case Command::look: cycle_look(step); break;
+    case Command::brightness:
+        g_brightness = (g_brightness + step + 5) % 5;
+        g_keys.brightness = g_brightness;
+        apply_video_options();
+        rewrite_keys_file([](const std::string &t) { return keymap::with_brightness(t, g_brightness); }, "brightness");
+        set_notice(g_brightness == 0 ? std::string("Brightness: normal") : "Brightness +" + std::to_string(g_brightness));
+        std::fprintf(stderr, "[menu] brightness %d\n", g_brightness);
+        break;
     case Command::scale:
         if (g_scale_locked) {
             set_notice("The resolution is set by PS2_SCALE; remove it to choose here");
@@ -1871,6 +1886,10 @@ bool open_window(bool fullscreen) {
     if (!g_scale_locked && g_keys.scale >= 1 && g_keys.scale <= 3) {
         ps2::os::set_env("PS2_SCALE", std::to_string(g_keys.scale));
         std::fprintf(stderr, "[video] resolution %dx from %s (scale = %d)\n", g_keys.scale, g_keys_path.c_str(), g_keys.scale);
+    } else if (const int fallback = std::atoi(ps2::os::env("PS2_SCALE_DEFAULT").c_str()); !g_scale_locked && fallback >= 1 && fallback <= 3) {
+        // nothing chosen in keys.ini yet: the game's own default (PS2_SCALE_DEFAULT; the iOS app sets it from the game folder's host.txt)
+        ps2::os::set_env("PS2_SCALE", std::to_string(fallback));
+        std::fprintf(stderr, "[video] resolution %dx (PS2_SCALE_DEFAULT; nothing chosen in %s yet)\n", fallback, g_keys_path.c_str());
     }
     g_scale_now = std::clamp(std::atoi(ps2::os::env("PS2_SCALE").c_str()), 1, 3);
     g_scale_next = g_scale_locked ? g_scale_now : (g_keys.scale >= 1 ? g_keys.scale : g_scale_now);

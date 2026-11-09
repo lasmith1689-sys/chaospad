@@ -43,6 +43,9 @@ rm -rf "$work/SDL2-2.32.10" && tar -xzf "$work/sdl2.tar.gz" -C "$work"
 echo "▶ The app's game folder"
 rm -rf "$work/game" && mkdir -p "$work/game"
 cp "$input/core.elf" "$input/args.txt" "$work/game/"
+# host.txt: the runner's options for this game (widescreen, the patch list, the default resolution); patches.txt: the PCSX2
+# widescreen patch's writes (host/ios/ios_app.mm reads host.txt)
+for extra in host.txt patches.txt; do [ ! -f "$input/$extra" ] || cp "$input/$extra" "$work/game/"; done
 echo "  $(find "$input/generated" -name '*.cpp' | wc -l | tr -d ' ') generated C++ files, $(du -sh "$input/generated" | cut -f1)"
 
 echo "▶ iOS build ($target, $jobs jobs)"

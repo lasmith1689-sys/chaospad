@@ -193,5 +193,10 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
         c = scene(in.uv);
     }
     if ((blit.options & 1u) != 0u) { c = edge_aa(in.uv, c); }
-    return vec4<f32>(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    c = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    // the brightness boost (options bits 8 to 11, 0 to 4): a power curve below 1 lifts the dark parts of the picture much more than
+    // the light ones (black stays black, white stays white), so a dark scene shows more without the bright ones washing out
+    let boost = f32((blit.options >> 8u) & 15u);
+    if (boost > 0.0) { c = pow(c, vec3<f32>(1.0 / (1.0 + 0.25 * boost))); }
+    return vec4<f32>(c, 1.0);
 }

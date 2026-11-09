@@ -8,12 +8,16 @@
 // - Documents (the Files app, "On My iPhone") holds what the app keeps: the memory card (card1.ps2), the quick saves, keys.ini,
 //   log.txt (stdout and stderr of the last run; log-prev.txt the run before) and an optional env.txt of KEY=VALUE lines that set
 //   environment variables (PS2_SCALE=2, for example) before anything reads them.
+// - The game folder may also hold host.txt: what this game wants from the runner, one item per line. A line starting with - is
+//   a host option (--widescreen, --patches patches.txt; a word naming a file of the game folder becomes its full path), a
+//   KEY=VALUE line a default for an environment variable (PS2_SCALE_DEFAULT=2) that env.txt can still change. # starts a comment.
 // Compiled with ARC.
 #import <BackgroundAssets/BackgroundAssets.h>
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #include <TargetConditionals.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -43,6 +47,36 @@ fs::path documents() {
 }
 
 fs::path bundle_game() { return fs::path(NSBundle.mainBundle.bundlePath.UTF8String) / "game"; }
+
+// host.txt of the game folder (see the top): KEY=VALUE defaults go into the environment now (env.txt, read after, wins), the
+// option lines are returned for the command line
+std::vector<std::string> load_host(const fs::path &game) {
+    std::vector<std::string> options;
+    std::ifstream in(game / "host.txt");
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        if (line[0] != '-') {
+            const std::size_t eq = line.find('=');
+            if (eq == std::string::npos || eq == 0) continue;
+            setenv(line.substr(0, eq).c_str(), line.substr(eq + 1).c_str(), 0);
+            std::fprintf(stderr, "[ios] host.txt: %s\n", line.c_str());
+            continue;
+        }
+        std::size_t at = 0;
+        while (at < line.size()) {
+            const std::size_t end = std::min(line.find(' ', at), line.size());
+            std::string word = line.substr(at, end - at);
+            at = end + 1;
+            if (word.empty()) continue;
+            std::error_code ec;
+            if (word[0] != '-' && fs::is_regular_file(game / word, ec)) word = (game / word).string();
+            options.push_back(word);
+        }
+    }
+    return options;
+}
 
 void load_env(const fs::path &file) {
     std::ifstream in(file);
@@ -209,9 +243,10 @@ std::vector<std::string> ps2_ios_arguments() {
     setenv("PS2_EE_LIVE", "0", 0);
     setenv("PS2_RECORD", "0", 0);
     setenv("PS2_NO_LOG_COPY", "1", 0);
+    const fs::path game = bundle_game();
+    const std::vector<std::string> host = load_host(game);
     load_env(docs / "env.txt");
 
-    const fs::path game = bundle_game();
     std::vector<std::string> args{"ps2run", (game / "core.elf").string()};
 
     std::string disc;
@@ -244,6 +279,7 @@ std::vector<std::string> ps2_ios_arguments() {
         args.push_back(disc);
     }
     args.insert(args.end(), {"--window", "--game-dir", game.string(), "--memcard", (docs / "card1.ps2").string(), "--quick-dir", docs.string()});
+    args.insert(args.end(), host.begin(), host.end());
     std::ifstream guest(game / "args.txt");
     std::string line;
     while (std::getline(guest, line)) {

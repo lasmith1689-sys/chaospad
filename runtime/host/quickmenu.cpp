@@ -109,15 +109,15 @@ constexpr const char *kFont[95] = {
 
 #ifdef PS2_IOS
 // a phone has no keyboard, no window to resize and no quit button: only what a finger can use
-constexpr int kEntries = 5;
-constexpr Command kCommands[kEntries] = {Command::resume, Command::save, Command::load, Command::look, Command::scale};
-constexpr const char *kKeys[kEntries] = {"", "", "", "", ""};
+constexpr int kEntries = 6;
+constexpr Command kCommands[kEntries] = {Command::resume, Command::save, Command::load, Command::look, Command::brightness, Command::scale};
+constexpr const char *kKeys[kEntries] = {"", "", "", "", "", ""};
 #else
-constexpr int kEntries = 9;
-constexpr Command kCommands[kEntries] = {Command::resume, Command::save,       Command::load, Command::look,       Command::scale,
+constexpr int kEntries = 10;
+constexpr Command kCommands[kEntries] = {Command::resume, Command::save,       Command::load, Command::look,       Command::brightness, Command::scale,
                                          Command::fullscreen, Command::keys, Command::change_keys, Command::quit};
 // the program's key for the same thing, shown dim at the right end of the entry
-constexpr const char *kKeys[kEntries] = {"F1", "F5", "F8", "F2", "", "F11", "", "", ""};
+constexpr const char *kKeys[kEntries] = {"F1", "F5", "F8", "F2", "", "", "F11", "", "", ""};
 #endif
 constexpr int kVisibleRows = 11;  // lines of the keys page shown at once; the page scrolls
 constexpr int kKeysPageChars = 58;
@@ -153,6 +153,7 @@ std::string entry_text(int i, const Values &v, bool quit_armed) {
     case Command::save: return "Quick save";
     case Command::load: return "Quick load";
     case Command::look: return "Picture look:  < " + v.look + " >";
+    case Command::brightness: return "Brightness:  < " + (v.brightness == 0 ? std::string("normal") : "+" + std::to_string(v.brightness)) + " >";
     case Command::scale: {
         const std::string now = std::to_string(v.scale_now) + "x";
         if (v.scale_locked) return "Resolution: " + now + " (set by PS2_SCALE)";
@@ -242,7 +243,7 @@ Command Menu::choose() {
 Command Menu::side() const {
     if (page_ == Page::keys) return Command::none;
     const Command c = kCommands[selected_];
-    return c == Command::look || c == Command::scale || c == Command::fullscreen ? c : Command::none;
+    return c == Command::look || c == Command::brightness || c == Command::scale || c == Command::fullscreen ? c : Command::none;
 }
 
 bool Menu::select_at(int x, int y) {

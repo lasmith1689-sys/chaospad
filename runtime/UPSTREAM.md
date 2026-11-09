@@ -9,4 +9,7 @@ with my changes for the iPhone app:
 - `runtime/src/gs/gpu/gpu.cpp`, `overlay.hpp`: a second overlay for the touch controls.
 - `host/touchpad.{hpp,cpp}`: on-screen controls; `host/window.cpp`: touch, UIKit Metal view, app lifecycle.
 - `host/main.cpp`, `host/ios/`: the app's start (folders, disc from the Background Assets pack, log), Info.plist.
-- `host/quickmenu.{hpp,cpp}`: the menu font for other pictures.
+- `host/quickmenu.{hpp,cpp}`: the menu font for other pictures, a Brightness entry (`keymap.cpp`: keys.ini `brightness`;
+  `runtime/src/gs/gpu/blit.wgsl`: the boost as a power curve in the present pass).
+- `host/window.cpp`: `PS2_SCALE_DEFAULT`, a game's default inner resolution when keys.ini has none.
+- `host/ios/ios_app.mm`: the game folder's `host.txt` (host options such as `--widescreen`, and environment defaults).
